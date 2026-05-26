@@ -1,0 +1,32 @@
+# --- Secrets & credentials ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.der
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+secrets/
+secrets.*
+
+# --- Virtual environment ---
+.venv/
+venv/
+env/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
