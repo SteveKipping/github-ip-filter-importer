@@ -55,7 +55,10 @@ python3 import_ip_allowlist.py --org DNDE-AEC --file ips.csv
 # 4. Import as inactive (disabled) entries
 python3 import_ip_allowlist.py --org DNDE-AEC --file ips.csv --inactive
 
-# 5. Re-import everything (don't skip entries that already exist)
+# 5. Include GitHub-hosted runner ranges from https://api.github.com/meta
+python3 import_ip_allowlist.py --org DNDE-AEC --file ips.csv --include-github-hosted-runners
+
+# 6. Re-import everything (don't skip entries that already exist)
 python3 import_ip_allowlist.py --org DNDE-AEC --file ips.csv --no-skip-existing
 ```
 
@@ -67,6 +70,7 @@ python3 import_ip_allowlist.py --org DNDE-AEC --file ips.csv --no-skip-existing
 | `--file` | *(required)* | Path to the CSV file |
 | `--active` / `--inactive` | active | Whether new entries are enabled or disabled |
 | `--skip-existing` / `--no-skip-existing` | skip | Skip IPs already on the allow list |
+| `--include-github-hosted-runners` | off | Include CIDR ranges from `https://api.github.com/meta` (`actions` key) |
 | `--dry-run` | off | Print what would be added without calling the API |
 
 ---
@@ -85,3 +89,26 @@ python3 import_ip_allowlist.py --org DNDE-AEC --file ips.csv --no-skip-existing
 - The script adds a small delay (300 ms) between API calls to avoid GitHub's secondary rate limits.
 - Validation of IP/CIDR syntax is done locally before any API calls are made.
 - The script exits with code `0` on full success and `1` if any entries failed to import.
+
+---
+
+## Daily GitHub Actions IP Change Monitor
+
+This repository includes a scheduled workflow at `.github/workflows/actions-ip-change-monitor.yml`
+that checks `https://api.github.com/meta` daily and watches the `actions` CIDR list.
+
+What it does:
+
+- Runs every day at `06:00 UTC` (and can also be triggered manually via **Run workflow**).
+- Stores the latest `actions` ranges snapshot in `.github/actions-ip-monitor/actions-ranges.json`.
+- Compares the latest list with the previous snapshot.
+- If ranges changed:
+  - commits the updated snapshot to the repository,
+  - opens (or comments on) an issue titled **GitHub Actions IP ranges changed**.
+
+### Required repository settings
+
+1. Ensure GitHub Actions has write permissions:
+   - Repository **Settings** -> **Actions** -> **General** -> **Workflow permissions**
+   - Select **Read and write permissions**.
+2. Ensure issues are enabled for the repository (the workflow creates/comments on issues).

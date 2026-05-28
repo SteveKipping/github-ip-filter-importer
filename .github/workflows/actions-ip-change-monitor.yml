@@ -1,0 +1,154 @@
+name: Monitor GitHub Actions IP Ranges
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch and compare GitHub Actions CIDR ranges
+        id: compare
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from pathlib import Path
+
+          snapshot_path = Path(".github/actions-ip-monitor/actions-ranges.json")
+          tmp_path = Path(".github/actions-ip-monitor/actions-ranges.new.json")
+          tmp_path.parent.mkdir(parents=True, exist_ok=True)
+
+          with urllib.request.urlopen("https://api.github.com/meta", timeout=30) as resp:
+              payload = json.load(resp)
+
+          new_ranges = sorted(set(payload.get("actions", [])))
+          if not new_ranges:
+              raise RuntimeError("GitHub Meta API returned no 'actions' ranges")
+
+          old_exists = snapshot_path.exists()
+          if old_exists:
+              old_ranges = sorted(set(json.loads(snapshot_path.read_text(encoding="utf-8"))))
+          else:
+              old_ranges = []
+
+          old_set = set(old_ranges)
+          new_set = set(new_ranges)
+          added = sorted(new_set - old_set)
+          removed = sorted(old_set - new_set)
+
+          changed = old_exists and (added or removed)
+          bootstrapped = not old_exists
+
+          tmp_path.write_text(json.dumps(new_ranges, indent=2) + "\n", encoding="utf-8")
+
+          def multiline(name: str, values: list[str]) -> str:
+              if not values:
+                  return f"{name}=\n"
+              out = [f"{name}<<EOF"]
+              out.extend(values)
+              out.append("EOF")
+              return "\n".join(out) + "\n"
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as out:
+              out.write(f"changed={'true' if changed else 'false'}\n")
+              out.write(f"bootstrapped={'true' if bootstrapped else 'false'}\n")
+              out.write(f"new_count={len(new_ranges)}\n")
+              out.write(f"old_count={len(old_ranges)}\n")
+              out.write(multiline("added", added))
+              out.write(multiline("removed", removed))
+          PY
+
+      - name: Persist latest snapshot
+        if: steps.compare.outputs.changed == 'true' || steps.compare.outputs.bootstrapped == 'true'
+        shell: bash
+        run: |
+          mkdir -p .github/actions-ip-monitor
+          mv .github/actions-ip-monitor/actions-ranges.new.json .github/actions-ip-monitor/actions-ranges.json
+
+      - name: Commit snapshot update
+        if: steps.compare.outputs.changed == 'true' || steps.compare.outputs.bootstrapped == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/actions-ip-monitor/actions-ranges.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+
+          git commit -m "chore: update GitHub Actions IP range snapshot"
+          git push
+
+      - name: Open or update notification issue
+        if: steps.compare.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        env:
+          ADDED: ${{ steps.compare.outputs.added }}
+          REMOVED: ${{ steps.compare.outputs.removed }}
+          OLD_COUNT: ${{ steps.compare.outputs.old_count }}
+          NEW_COUNT: ${{ steps.compare.outputs.new_count }}
+        with:
+          script: |
+            const added = (process.env.ADDED || "").split("\n").filter(Boolean);
+            const removed = (process.env.REMOVED || "").split("\n").filter(Boolean);
+            const oldCount = process.env.OLD_COUNT;
+            const newCount = process.env.NEW_COUNT;
+            const title = "GitHub Actions IP ranges changed";
+
+            const formatList = (label, values) => {
+              if (!values.length) return `### ${label}\n- None`;
+              return `### ${label}\n${values.map(v => `- ${v}`).join("\n")}`;
+            };
+
+            const body = [
+              "The daily monitor detected a change in `https://api.github.com/meta` (`actions` list).",
+              "",
+              `Previous count: ${oldCount}`,
+              `Current count: ${newCount}`,
+              "",
+              formatList("Added ranges", added),
+              "",
+              formatList("Removed ranges", removed),
+              "",
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ].join("\n");
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+
+            const existing = issues.find(issue => issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ["automation", "ip-allowlist"],
+              });
+            }

@@ -37,6 +37,7 @@ except ImportError:
                     os.environ.setdefault(_k.strip(), _v.strip())
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+GITHUB_META_URL = "https://api.github.com/meta"
 
 
 def graphql_request(token: str, query: str, variables: dict) -> dict:
@@ -57,6 +58,26 @@ def graphql_request(token: str, query: str, variables: dict) -> dict:
         errors = "; ".join(e["message"] for e in data["errors"])
         raise RuntimeError(f"GraphQL error: {errors}")
     return data
+
+
+def fetch_github_hosted_runner_ranges() -> list[str]:
+    """Fetch GitHub-hosted runner CIDR ranges from the GitHub Meta API."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+    }
+    response = requests.get(GITHUB_META_URL, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    data = response.json()
+    ranges = data.get("actions")
+    if not isinstance(ranges, list):
+        raise RuntimeError("GitHub Meta API response does not contain an 'actions' list.")
+
+    normalized = [r.strip() for r in ranges if isinstance(r, str) and r.strip()]
+    if not normalized:
+        raise RuntimeError("GitHub Meta API returned no hosted runner IP ranges.")
+
+    return normalized
 
 
 def get_org_node_id(token: str, org: str) -> str:
@@ -195,6 +216,11 @@ def main() -> int:
         action="store_true",
         help="Validate and print what would be added without making any changes",
     )
+    parser.add_argument(
+        "--include-github-hosted-runners",
+        action="store_true",
+        help="Include GitHub-hosted runner ranges from https://api.github.com/meta (actions)",
+    )
     args = parser.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -213,6 +239,33 @@ def main() -> int:
     if not rows:
         print("No rows found in CSV. Nothing to import.")
         return 0
+
+    if args.include_github_hosted_runners:
+        print("Fetching GitHub-hosted runner ranges from GitHub Meta API...")
+        try:
+            runner_ranges = fetch_github_hosted_runner_ranges()
+        except (requests.HTTPError, requests.RequestException, RuntimeError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+        existing_input_ips = {r["ip"] for r in rows}
+        added_runner_ranges = 0
+        for runner_range in runner_ranges:
+            if runner_range in existing_input_ips:
+                continue
+            rows.append(
+                {
+                    "ip": runner_range,
+                    "name": "GitHub Hosted Runner",
+                    "lineno": "meta:actions",
+                }
+            )
+            existing_input_ips.add(runner_range)
+            added_runner_ranges += 1
+
+        print(
+            f"  Added {added_runner_ranges} hosted-runner entr{'y' if added_runner_ranges == 1 else 'ies'} from GitHub Meta API."
+        )
 
     invalid = [r for r in rows if not validate_ip_or_cidr(r["ip"])]
     if invalid:
